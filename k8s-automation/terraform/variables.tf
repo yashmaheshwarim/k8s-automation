@@ -10,9 +10,9 @@ variable "aws_region" {
 }
 
 variable "instance_type" {
-  description = "EC2 instance type for the Kubernetes lab."
+  description = "EC2 instance type for the Kubernetes lab. t3.micro is covered by the AWS Free Tier for eligible accounts."
   type        = string
-  default     = "t3.medium"
+  default     = "t3.micro"
 
   validation {
     condition     = length(trimspace(var.instance_type)) > 0
@@ -21,9 +21,9 @@ variable "instance_type" {
 }
 
 variable "root_volume_size" {
-  description = "Size in GB for the EC2 root volume."
+  description = "Size in GB for the EC2 root volume. 30 GB gp3 stays within the AWS Free Tier allowance."
   type        = number
-  default     = 20
+  default     = 30
 
   validation {
     condition     = var.root_volume_size > 0 && var.root_volume_size <= 500
@@ -32,13 +32,35 @@ variable "root_volume_size" {
 }
 
 variable "kubernetes_version" {
-  description = "Kubernetes version to install and bootstrap."
+  description = "Kubernetes version used for the kind node image (kindest/node image tag)."
   type        = string
   default     = "1.31.4"
 
   validation {
     condition     = can(regex("^1\\.[0-9]+\\.[0-9]+$", var.kubernetes_version))
     error_message = "kubernetes_version must look like 1.31.4."
+  }
+}
+
+variable "kind_version" {
+  description = "kind CLI version installed on the EC2 instance."
+  type        = string
+  default     = "v0.24.0"
+
+  validation {
+    condition     = can(regex("^v[0-9]+\\.[0-9]+\\.[0-9]+$", var.kind_version))
+    error_message = "kind_version must look like v0.24.0."
+  }
+}
+
+variable "kind_cluster_name" {
+  description = "Name of the kind cluster created on the EC2 instance."
+  type        = string
+  default     = "k8s-lab"
+
+  validation {
+    condition     = can(regex("^[a-z0-9]([-a-z0-9]*[a-z0-9])?$", var.kind_cluster_name))
+    error_message = "kind_cluster_name must be a lowercase DNS-1123 name."
   }
 }
 

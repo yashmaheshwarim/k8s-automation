@@ -4,7 +4,8 @@ This lab is designed to remain inexpensive and intentionally minimal. It is buil
 
 ## Cost-aware design choices
 
-- Single EC2 instance only
+- Single EC2 instance only, default `t3.micro`
+- 30 GB gp3 root volume, within the Free Tier EBS allowance
 - No NAT Gateway
 - No Application Load Balancer
 - No Elastic IP unless you explicitly add one
@@ -30,7 +31,7 @@ Free Tier eligibility depends on:
 - the selected instance type and usage period
 - current limits and exclusions
 
-Do not assume that `t3.medium` is automatically Free Tier eligible. Sometimes a region or account might still be ineligible even when the instance type is typically low-cost.
+The defaults (`t3.micro`, 30 GB gp3, single instance) match the classic 750 hours/month EC2 allowance and 30 GB EBS allowance for eligible accounts. Public IPv4 addresses are billed separately and are not part of the Free Tier in all regions, so an idle instance can still cost a small amount. Always confirm the current offer for your account and region, and destroy the lab when you are done.
 
 ## Security safeguards
 

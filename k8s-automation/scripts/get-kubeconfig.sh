@@ -9,6 +9,6 @@ if [ -z "$HOST" ]; then
   exit 1
 fi
 
-scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "${SSH_USER}@${HOST}:/home/ubuntu/.kube/config" ./kubeconfig
+scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "${SSH_USER}@${HOST}:/home/ubuntu/.kube/config-remote" ./kubeconfig
 chmod 600 ./kubeconfig
 printf 'Kubeconfig saved to %s\n' "$(pwd)/kubeconfig"

@@ -90,9 +90,15 @@ resource "aws_instance" "k8s_lab" {
   key_name                    = var.key_name != "" ? var.key_name : null
   associate_public_ip_address = true
 
-  user_data = base64encode(templatefile("${path.module}/userdata.sh.tpl", {
+  user_data = templatefile("${path.module}/userdata.sh.tpl", {
     kubernetes_version = var.kubernetes_version
-  }))
+    kind_version       = var.kind_version
+    kind_cluster_name  = var.kind_cluster_name
+  })
+
+  # Recreate the instance when the bootstrap script changes so the kind cluster
+  # is always built from the current user data on first boot.
+  user_data_replace_on_change = true
 
   root_block_device {
     volume_type           = "gp3"

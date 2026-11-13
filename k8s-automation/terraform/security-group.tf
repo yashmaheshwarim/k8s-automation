@@ -20,7 +20,7 @@ resource "aws_security_group" "k8s" {
   }
 
   ingress {
-    description = "Kubelet API"
+    description = "kind control-plane API server (kubelet and internal traffic)"
     from_port   = 10250
     to_port     = 10250
     protocol    = "tcp"
@@ -28,17 +28,9 @@ resource "aws_security_group" "k8s" {
   }
 
   ingress {
-    description = "Flannel VXLAN"
-    from_port   = 8472
-    to_port     = 8472
-    protocol    = "udp"
-    self        = true
-  }
-
-  ingress {
     description = "Internal node traffic"
     from_port   = 0
-    to_port     = 65535
+    to_port     = 0
     protocol    = "-1"
     self        = true
   }

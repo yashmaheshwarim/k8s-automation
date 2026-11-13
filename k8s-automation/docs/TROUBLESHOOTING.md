@@ -12,84 +12,92 @@ ls -l /var/log/cloud-init-output.log
 
 If there are errors, confirm that the AWS EC2 instance has a public subnet and the instance is running. Also verify the user-data script in Terraform is valid shell and that the instance metadata service is reachable.
 
-## containerd failing to start
+## Bootstrap log and status
 
-Inspect the service and configuration:
+All bootstrap output is appended to `/var/log/k8s-install.log`:
 
 ```bash
-sudo systemctl status containerd --no-pager
-sudo journalctl -u containerd --no-pager -n 200
-sudo containerd config dump
+sudo tail -n 200 /var/log/k8s-install.log
+cat /var/lib/k8s-automation/status
+```
+
+The status file contains `install-complete` after Docker/kubectl/kind are installed and `cluster-ready` after the kind cluster passes its checks.
+
+## Docker fails to install or start
+
+```bash
+sudo systemctl status docker --no-pager
+sudo journalctl -u docker --no-pager -n 200
+sudo docker info
 ```
 
 Common fixes:
 
-- Ensure `SystemdCgroup = true` in `/etc/containerd/config.toml`
-- Restart containerd: `sudo systemctl restart containerd`
-- Verify the config file is valid and the service is enabled
+- Confirm the Docker apt repository was added: `cat /etc/apt/sources.list.d/docker.list`
+- Check disk space: `df -h /`
+- Restart Docker: `sudo systemctl restart docker`
 
-## kubeadm init errors
+If Docker cannot start because the instance ran out of disk, grow the root volume with a larger `root_volume_size` and re-apply.
 
-Look for kubelet or control-plane failures:
+## kind create cluster fails
 
-```bash
-sudo journalctl -u kubelet -n 200 --no-pager
-sudo kubeadm reset -f
-sudo kubeadm init --pod-network-cidr=10.244.0.0/16 --cri-socket unix:///run/containerd/containerd.sock
-```
-
-Typical causes include:
-
-- Swap still enabled
-- Missing kernel modules or sysctl settings
-- containerd not using the correct cgroup driver
-- DNS or network issues during cluster bootstrap
-
-## Swap not disabled
-
-Check whether swap is active:
+Inspect kind and the bootstrap logs:
 
 ```bash
-swapon --show
-sudo swapoff -a
-sudo sed -ri '/\sswap\s/s/^#?/#/' /etc/fstab
+kind version
+sudo tail -n 200 /var/log/k8s-install.log
+docker ps -a
+kind get clusters
 ```
 
-Then reboot or re-run the installation script. Kubernetes requires swap to be disabled for proper operation.
+Typical causes:
 
-## Kubernetes node stuck in NotReady
+- Docker daemon not running
+- Not enough memory: `t3.micro` has 1 GiB, so the 2 GB swap file must exist (`swapon --show`)
+- Image pull failures caused by DNS or outbound network issues
+- A previous failed cluster container still exists
 
-Run:
+To retry from scratch:
+
+```bash
+kind delete cluster --name k8s-lab
+sudo /opt/k8s-automation/initialize-cluster.sh
+```
+
+## kind node stuck in NotReady
 
 ```bash
 kubectl get nodes
-kubectl describe node <node-name>
+kubectl describe node k8s-lab-control-plane
 kubectl get pods -A
-kubectl -n kube-system get pods
+kubectl -n kube-system logs -l k8s-app=kube-dns --tail=200
 ```
 
 Look for:
 
-- Flannel issues
-- containerd runtime problems
-- kubelet crash loops
-- cgroup or networking configuration problems
+- kindnet or CoreDNS pods crash looping
+- Docker container for the node restarting (`docker ps -a`)
+- Memory pressure on the host (`free -h`, `dmesg | tail`)
 
-## Flannel pod stuck in CrashLoopBackOff
+## API server unreachable from your machine
 
-Check the pod and daemonset logs:
+The API is served on port 6443 and the certificate includes the instance public IP captured at boot.
 
 ```bash
-kubectl -n kube-system get pods
-kubectl -n kube-system describe pod -l app=flannel
-kubectl -n kube-system logs -l app=flannel --all-containers --tail=200
+curl -k https://<EC2_PUBLIC_IP>:6443/healthz
 ```
 
-Common causes include:
+Check:
 
-- Pod CIDR mismatch
-- Missing kube-config or stale cluster state
-- Flannel manifest incompatible with the cluster version
-- Network policy or firewall restrictions
+- `kubernetes_api_cidr` includes your current public IP
+- The security group allows TCP 6443 from that CIDR
+- The instance public IP has not changed since boot (stop/start behavior). If it changed, delete and recreate the cluster so the certificate matches, or attach an Elastic IP.
 
-If necessary, re-run the initialization flow after resetting kubeadm.
+## Swap not active
+
+```bash
+swapon --show
+sudo swapon /swapfile
+```
+
+The bootstrap adds `/swapfile` to `/etc/fstab`, so it is restored after reboot. Kubernetes runs inside the kind container, so host swap does not break kubelet requirements.

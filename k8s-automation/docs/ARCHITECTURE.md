@@ -9,18 +9,18 @@ The Terraform configuration provisions:
 - A dedicated VPC with a public subnet
 - An Internet Gateway and route table
 - A security group that allows only trusted ingress traffic
-- A single EC2 instance running Ubuntu Server 24.04 LTS (amd64)
-- A 20 GB gp3 root volume by default
+- A single Free Tier eligible `t3.micro` EC2 instance running Ubuntu Server 24.04 LTS (amd64)
+- A 30 GB gp3 root volume by default
 
 ## Kubernetes design
 
-- Cluster type: single-node kubeadm cluster
-- Container runtime: containerd
-- Kubernetes version: configurable, default 1.31.4
-- CNI: Flannel
-- Pod network: 10.244.0.0/16
-- Node role: control plane + worker
-- Taint removal: the default control-plane NoSchedule taint is removed so workloads can schedule
+- Cluster type: single-node kind cluster running inside a Docker container
+- Host runtime: Docker Engine (installed during boot)
+- Kubernetes version: configurable, default 1.31.4, via the `kindest/node` image
+- kind version: configurable, default v0.24.0
+- CNI: kindnet, provided by kind
+- Node role: control plane + worker (taint removed so workloads can schedule)
+- API endpoint: kind binds the API server on `0.0.0.0:6443` and the kubeadm certificate includes the instance public IP
 
 ## Network flow
 
@@ -35,11 +35,12 @@ The instance is placed in a public subnet with direct Internet access. Outbound 
 
 1. EC2 starts
 2. Cloud-init (via EC2 User Data) runs
-3. `install-kubernetes.sh` installs dependencies, containerd, and Kubernetes packages
-4. `initialize-cluster.sh` runs `kubeadm init`
-5. Flannel is installed
-6. Node taint is removed and the node becomes Ready
-7. The cluster is considered ready only after actual node and pod checks pass
+3. A 2 GB swap file is created, since `t3.micro` only provides 1 GiB of RAM
+4. `install-kubernetes.sh` installs Docker Engine, kubectl, and the kind CLI
+5. `initialize-cluster.sh` writes `/etc/kind/kind-config.yaml` and runs `kind create cluster`
+6. kubeconfig is pointed at the instance public IP and copied to `/home/ubuntu/.kube/config`
+7. Node taint is removed, the node becomes Ready, and core DNS is verified
+8. The cluster is considered ready only after actual node and pod checks pass
 
 ## Why this architecture
 

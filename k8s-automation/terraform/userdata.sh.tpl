@@ -5,13 +5,16 @@ export DEBIAN_FRONTEND=noninteractive
 export LOG_FILE="/var/log/k8s-install.log"
 export STATUS_FILE="/var/lib/k8s-automation/status"
 export KUBERNETES_VERSION="${kubernetes_version}"
+export KIND_VERSION="${kind_version}"
+export KIND_CLUSTER_NAME="${kind_cluster_name}"
 
 mkdir -p /var/lib/k8s-automation
 mkdir -p /opt/k8s-automation
+mkdir -p /etc/kind
 
 exec > >(tee -a "$LOG_FILE") 2>&1
 
-echo "[$(date -Is)] Starting Kubernetes bootstrap"
+echo "[$(date -Is)] Starting kind bootstrap"
 
 cat <<'SCRIPT_INSTALL' >/opt/k8s-automation/install-kubernetes.sh
 #!/usr/bin/env bash
@@ -21,18 +24,17 @@ export DEBIAN_FRONTEND=noninteractive
 LOG_FILE="$${LOG_FILE:-/var/log/k8s-install.log}"
 STATUS_FILE="$${STATUS_FILE:-/var/lib/k8s-automation/status}"
 KUBERNETES_VERSION="$${KUBERNETES_VERSION:-1.31.4}"
-KUBERNETES_MINOR="$${KUBERNETES_VERSION%.*}"
+KIND_VERSION="$${KIND_VERSION:-v0.24.0}"
 
 log() {
   echo "[$(date -Is)] $*"
 }
 
-mkdir -p /var/lib/k8s-automation
-mkdir -p /etc/apt/keyrings
+mkdir -p /var/lib/k8s-automation /etc/apt/keyrings
 
 exec >>"$LOG_FILE" 2>&1
 
-log "Starting Kubernetes installation for version $${KUBERNETES_VERSION}"
+log "Starting kind prerequisites installation"
 
 if ! grep -Eq 'ubuntu' /etc/os-release 2>/dev/null; then
   log "This script expects Ubuntu 24.04 or a compatible Ubuntu-based system"
@@ -41,54 +43,43 @@ fi
 
 log "Updating apt packages"
 apt-get update
-apt-get install -y apt-transport-https ca-certificates curl gpg software-properties-common
+apt-get install -y ca-certificates curl gnupg apt-transport-https
 
-log "Disabling swap and adjusting fstab"
-swapoff -a || true
-if grep -Eq '\sswap\s' /etc/fstab; then
-  sed -ri '/\sswap\s/s/^#?/#/' /etc/fstab
+log "Adding 2G swap file for small free tier instances"
+if [ ! -f /swapfile ]; then
+  fallocate -l 2G /swapfile || dd if=/dev/zero of=/swapfile bs=1M count=2048
+  chmod 600 /swapfile
+  mkswap /swapfile
+  swapon /swapfile
+  grep -q '^/swapfile ' /etc/fstab || echo '/swapfile none swap sw 0 0' >>/etc/fstab
 fi
 
-log "Loading kernel modules"
-modprobe overlay
-modprobe br_netfilter
-cat <<'EOF' >/etc/modules-load.d/k8s.conf
-overlay
-br_netfilter
-EOF
-
-log "Configuring sysctl for Kubernetes networking"
-cat <<'EOF' >/etc/sysctl.d/99-kubernetes-cri.conf
-net.bridge.bridge-nf-call-iptables = 1
-net.ipv4.ip_forward = 1
-net.bridge.bridge-nf-call-ip6tables = 1
-EOF
-sysctl --system >/dev/null
-
-log "Installing containerd"
-apt-get install -y containerd
-mkdir -p /etc/containerd
-containerd config default > /etc/containerd/config.toml
-sed -i 's/SystemdCgroup = false/SystemdCgroup = true/' /etc/containerd/config.toml
-systemctl enable --now containerd
-systemctl restart containerd
-
-log "Installing Kubernetes repository"
-curl -fsSL "https://pkgs.k8s.io/core:/stable:/v$${KUBERNETES_MINOR}:/deb/Release.key" | gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
-cat <<EOF >/etc/apt/sources.list.d/kubernetes.list
-deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v$${KUBERNETES_MINOR}:/deb/ /
+log "Installing Docker Engine"
+install -m 0755 -d /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+chmod a+r /etc/apt/keyrings/docker.asc
+cat <<EOF >/etc/apt/sources.list.d/docker.list
+deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable
 EOF
 apt-get update
+apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+systemctl enable --now docker
+usermod -aG docker ubuntu
 
-log "Installing kubelet, kubeadm and kubectl"
-apt-get install -y kubelet kubeadm kubectl
-apt-mark hold kubelet kubeadm kubectl
+log "Installing kubectl v$${KUBERNETES_VERSION}"
+curl -fsSLo /usr/local/bin/kubectl "https://dl.k8s.io/release/v$${KUBERNETES_VERSION}/bin/linux/amd64/kubectl"
+curl -fsSLo /tmp/kubectl.sha256 "https://dl.k8s.io/release/v$${KUBERNETES_VERSION}/bin/linux/amd64/kubectl.sha256"
+echo "$(cat /tmp/kubectl.sha256)  /usr/local/bin/kubectl" | sha256sum --check
+chmod 0755 /usr/local/bin/kubectl
+kubectl version --client
 
-log "Enabling kubelet"
-systemctl enable kubelet --now
+log "Installing kind $${KIND_VERSION}"
+curl -fsSLo /usr/local/bin/kind "https://kind.sigs.k8s.io/dl/$${KIND_VERSION}/kind-linux-amd64"
+chmod +x /usr/local/bin/kind
+kind version
 
-printf '%s\n' "install-complete" > "$${STATUS_FILE}"
-log "Kubernetes packages installed successfully"
+printf '%s\n' "install-complete" > "$STATUS_FILE"
+log "kind prerequisites installed successfully"
 SCRIPT_INSTALL
 
 cat <<'SCRIPT_INIT' >/opt/k8s-automation/initialize-cluster.sh
@@ -99,55 +90,85 @@ export DEBIAN_FRONTEND=noninteractive
 LOG_FILE="$${LOG_FILE:-/var/log/k8s-install.log}"
 STATUS_FILE="$${STATUS_FILE:-/var/lib/k8s-automation/status}"
 KUBERNETES_VERSION="$${KUBERNETES_VERSION:-1.31.4}"
+KIND_CLUSTER_NAME="$${KIND_CLUSTER_NAME:-k8s-lab}"
+KIND_CONFIG_FILE="/etc/kind/kind-config.yaml"
 
 log() {
   echo "[$(date -Is)] $*"
 }
 
-exec >>"$${LOG_FILE}" 2>&1
+exec >>"$LOG_FILE" 2>&1
 
-if [ -f /etc/kubernetes/admin.conf ] && kubectl get nodes >/dev/null 2>&1; then
-  log "Kubernetes cluster already initialized. Skipping kubeadm init."
-  printf '%s\n' "cluster-ready" > "$${STATUS_FILE}"
+export KUBECONFIG=/root/.kube/config
+
+if kind get clusters 2>/dev/null | grep -qx "$KIND_CLUSTER_NAME"; then
+  log "kind cluster $KIND_CLUSTER_NAME already exists. Skipping creation."
+  printf '%s\n' "cluster-ready" > "$STATUS_FILE"
   exit 0
 fi
 
-log "Initializing Kubernetes cluster with kubeadm"
-kubeadm init \
-  --pod-network-cidr=10.244.0.0/16 \
-  --cri-socket unix:///run/containerd/containerd.sock \
-  --kubernetes-version "v$${KUBERNETES_VERSION}"
+log "Discovering instance public IP for the API server certificate"
+IMDS_TOKEN="$(curl -sX PUT -H 'X-aws-ec2-metadata-token-ttl-seconds: 21600' http://169.254.169.254/latest/api/token || true)"
+PUBLIC_IP="$(curl -s -H "X-aws-ec2-metadata-token: $${IMDS_TOKEN}" http://169.254.169.254/latest/meta-data/public-ipv4 || true)"
+if ! printf '%s' "$PUBLIC_IP" | grep -Eq '^[0-9]+(\.[0-9]+){3}$'; then
+  log "Could not read a public IPv4 address from instance metadata; falling back to 127.0.0.1"
+  PUBLIC_IP="127.0.0.1"
+fi
+log "Using $${PUBLIC_IP} as the API server address"
 
-mkdir -p /root/.kube
-cp -f /etc/kubernetes/admin.conf /root/.kube/config
-chmod 600 /root/.kube/config
+log "Writing kind cluster configuration"
+mkdir -p /etc/kind
+cat <<EOF >"$KIND_CONFIG_FILE"
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: $KIND_CLUSTER_NAME
+networking:
+  apiServerAddress: "0.0.0.0"
+  apiServerPort: 6443
+nodes:
+  - role: control-plane
+    kubeadmConfigPatches:
+      - |
+        kind: ClusterConfiguration
+        apiServer:
+          certSANs:
+            - "127.0.0.1"
+            - "localhost"
+            - "$PUBLIC_IP"
+EOF
+
+log "Creating kind cluster $KIND_CLUSTER_NAME with kindest/node:v$${KUBERNETES_VERSION}"
+kind create cluster \
+  --name "$KIND_CLUSTER_NAME" \
+  --image "kindest/node:v$${KUBERNETES_VERSION}" \
+  --config "$KIND_CONFIG_FILE" \
+  --wait 600s
+
+log "Configuring kubeconfig for local and remote access"
+kubectl config set-cluster "kind-$KIND_CLUSTER_NAME" --server="https://127.0.0.1:6443" >/dev/null
 
 mkdir -p /home/ubuntu/.kube
-cp -f /etc/kubernetes/admin.conf /home/ubuntu/.kube/config
-chown ubuntu:ubuntu /home/ubuntu/.kube/config
-chmod 600 /home/ubuntu/.kube/config
+cp -f /root/.kube/config /home/ubuntu/.kube/config
+cp -f /root/.kube/config /home/ubuntu/.kube/config-remote
+kubectl config set-cluster "kind-$KIND_CLUSTER_NAME" \
+  --server="https://$${PUBLIC_IP}:6443" \
+  --kubeconfig=/home/ubuntu/.kube/config-remote >/dev/null
+chown -R ubuntu:ubuntu /home/ubuntu/.kube
+chmod 600 /home/ubuntu/.kube/config /home/ubuntu/.kube/config-remote
 
-export KUBECONFIG=/etc/kubernetes/admin.conf
-
-log "Installing Flannel CNI"
-kubectl apply -f https://raw.githubusercontent.com/flannel-io/flannel/master/Documentation/kube-flannel.yml
-
-log "Waiting for Flannel pod to become ready"
-kubectl -n kube-system wait --for=condition=Ready pod -l app=flannel --timeout=600s
-
-log "Removing control-plane taint to allow scheduling"
+log "Removing control-plane taint to allow workloads to schedule"
 kubectl taint nodes --all node-role.kubernetes.io/control-plane- || true
-kubectl taint nodes --all node-role.kubernetes.io/master- || true
 
-log "Waiting for node to become Ready"
+log "Waiting for the kind node to become Ready"
 kubectl wait --for=condition=Ready node --all --timeout=600s
 
 log "Verifying system pods"
 kubectl -n kube-system rollout status deployment/coredns --timeout=300s
+kubectl get nodes -o wide
 kubectl get pods -A
 
-printf '%s\n' "cluster-ready" > "$${STATUS_FILE}"
-log "Cluster initialization complete"
+printf '%s\n' "cluster-ready" > "$STATUS_FILE"
+log "kind cluster initialization complete"
 SCRIPT_INIT
 
 chmod +x /opt/k8s-automation/install-kubernetes.sh /opt/k8s-automation/initialize-cluster.sh
@@ -155,4 +176,4 @@ chmod +x /opt/k8s-automation/install-kubernetes.sh /opt/k8s-automation/initializ
 /opt/k8s-automation/install-kubernetes.sh
 /opt/k8s-automation/initialize-cluster.sh
 
-echo "[$(date -Is)] Kubernetes lab bootstrap completed successfully"
+echo "[$(date -Is)] kind cluster bootstrap completed successfully"

@@ -5,18 +5,17 @@ export DEBIAN_FRONTEND=noninteractive
 LOG_FILE="${LOG_FILE:-/var/log/k8s-install.log}"
 STATUS_FILE="${STATUS_FILE:-/var/lib/k8s-automation/status}"
 KUBERNETES_VERSION="${KUBERNETES_VERSION:-1.31.4}"
-KUBERNETES_MINOR="${KUBERNETES_VERSION%.*}"
+KIND_VERSION="${KIND_VERSION:-v0.24.0}"
 
 log() {
   echo "[$(date -Is)] $*"
 }
 
-mkdir -p /var/lib/k8s-automation
-mkdir -p /etc/apt/keyrings
+mkdir -p /var/lib/k8s-automation /etc/apt/keyrings
 
 exec >>"$LOG_FILE" 2>&1
 
-log "Starting Kubernetes installation for version ${KUBERNETES_VERSION}"
+log "Starting kind prerequisites installation"
 
 if ! grep -Eq 'ubuntu' /etc/os-release 2>/dev/null; then
   log "This script expects Ubuntu 24.04 or a compatible Ubuntu-based system"
@@ -25,51 +24,40 @@ fi
 
 log "Updating apt packages"
 apt-get update
-apt-get install -y apt-transport-https ca-certificates curl gpg software-properties-common
+apt-get install -y ca-certificates curl gnupg apt-transport-https
 
-log "Disabling swap and adjusting fstab"
-swapoff -a || true
-if grep -Eq '\sswap\s' /etc/fstab; then
-  sed -ri '/\sswap\s/s/^#?/#/' /etc/fstab
+log "Adding 2G swap file for small free tier instances"
+if [ ! -f /swapfile ]; then
+  fallocate -l 2G /swapfile || dd if=/dev/zero of=/swapfile bs=1M count=2048
+  chmod 600 /swapfile
+  mkswap /swapfile
+  swapon /swapfile
+  grep -q '^/swapfile ' /etc/fstab || echo '/swapfile none swap sw 0 0' >>/etc/fstab
 fi
 
-log "Loading kernel modules"
-modprobe overlay
-modprobe br_netfilter
-cat <<'EOF' >/etc/modules-load.d/k8s.conf
-overlay
-br_netfilter
-EOF
-
-log "Configuring sysctl for Kubernetes networking"
-cat <<'EOF' >/etc/sysctl.d/99-kubernetes-cri.conf
-net.bridge.bridge-nf-call-iptables = 1
-net.ipv4.ip_forward = 1
-net.bridge.bridge-nf-call-ip6tables = 1
-EOF
-sysctl --system >/dev/null
-
-log "Installing containerd"
-apt-get install -y containerd
-mkdir -p /etc/containerd
-containerd config default > /etc/containerd/config.toml
-sed -i 's/SystemdCgroup = false/SystemdCgroup = true/' /etc/containerd/config.toml
-systemctl enable --now containerd
-systemctl restart containerd
-
-log "Installing Kubernetes repository"
-curl -fsSL "https://pkgs.k8s.io/core:/stable:/v${KUBERNETES_MINOR}:/deb/Release.key" | gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
-cat <<EOF >/etc/apt/sources.list.d/kubernetes.list
-deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v${KUBERNETES_MINOR}:/deb/ /
+log "Installing Docker Engine"
+install -m 0755 -d /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+chmod a+r /etc/apt/keyrings/docker.asc
+cat <<EOF >/etc/apt/sources.list.d/docker.list
+deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable
 EOF
 apt-get update
+apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+systemctl enable --now docker
+usermod -aG docker ubuntu
 
-log "Installing kubelet, kubeadm and kubectl"
-apt-get install -y kubelet kubeadm kubectl
-apt-mark hold kubelet kubeadm kubectl
+log "Installing kubectl v${KUBERNETES_VERSION}"
+curl -fsSLo /usr/local/bin/kubectl "https://dl.k8s.io/release/v${KUBERNETES_VERSION}/bin/linux/amd64/kubectl"
+curl -fsSLo /tmp/kubectl.sha256 "https://dl.k8s.io/release/v${KUBERNETES_VERSION}/bin/linux/amd64/kubectl.sha256"
+echo "$(cat /tmp/kubectl.sha256)  /usr/local/bin/kubectl" | sha256sum --check
+chmod 0755 /usr/local/bin/kubectl
+kubectl version --client
 
-log "Enabling kubelet"
-systemctl enable kubelet --now
+log "Installing kind ${KIND_VERSION}"
+curl -fsSLo /usr/local/bin/kind "https://kind.sigs.k8s.io/dl/${KIND_VERSION}/kind-linux-amd64"
+chmod +x /usr/local/bin/kind
+kind version
 
 printf '%s\n' "install-complete" > "$STATUS_FILE"
-log "Kubernetes packages installed successfully"
+log "kind prerequisites installed successfully"

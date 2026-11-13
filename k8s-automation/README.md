@@ -1,14 +1,16 @@
 # Kubernetes Automation on AWS
 
-This project provisions a single-node Kubernetes lab on AWS EC2 using Terraform and Ubuntu 24.04. It creates a control-plane/worker node, installs containerd, kubeadm, kubelet, kubectl, and Flannel, and leaves you with a ready-to-use cluster for learning DevOps and Kubernetes.
+This project provisions a Free Tier eligible single EC2 instance on AWS using Terraform and Ubuntu 24.04, then automatically installs Docker and creates a single-node Kubernetes [kind](https://kind.sigs.k8s.io/) cluster on it. The EC2 User Data bootstrap runs unattended, so the cluster is ready without any manual steps after `terraform apply`.
 
 ## Features
 
 - Terraform-managed AWS infrastructure
+- Free Tier sized EC2 instance (`t3.micro`, 30 GB gp3 root volume)
 - Ubuntu Server 24.04 LTS AMI lookup via Canonical source
-- Single-node Kubernetes cluster using kubeadm
-- containerd runtime
-- Flannel CNI with Pod CIDR 10.244.0.0/16
+- Docker Engine installed automatically
+- Single-node Kubernetes cluster created with kind
+- kindnet CNI provided by kind (no separate CNI install)
+- Public API endpoint on port 6443 with a certificate that includes the instance public IP
 - Automatic cluster bootstrap via EC2 User Data
 - Security group restricting SSH and Kubernetes API to trusted CIDRs
 - Output values for EC2 connection and cluster access
@@ -30,7 +32,6 @@ k8s-automation/
 ├── scripts/
 │   ├── install-kubernetes.sh
 │   ├── initialize-cluster.sh
-│   ├── install-flannel.sh
 │   ├── verify-cluster.sh
 │   ├── get-kubeconfig.sh
 │   └── cleanup-local.sh
@@ -69,9 +70,11 @@ Example:
 aws_region = "us-east-1"
 allowed_ssh_cidr = "203.0.113.10/32"
 kubernetes_api_cidr = "203.0.113.10/32"
-instance_type = "t3.medium"
-root_volume_size = 20
+instance_type = "t3.micro"
+root_volume_size = 30
 kubernetes_version = "1.31.4"
+kind_version = "v0.24.0"
+kind_cluster_name = "k8s-lab"
 key_name = ""
 ```
 
@@ -93,7 +96,11 @@ After apply, Terraform prints:
 - EC2 private IP
 - SSH command
 - instance ID
+- kind cluster name
 - Kubernetes API endpoint
+- kubeconfig copy command
+
+The instance bootstraps itself: it installs Docker, kubectl and kind, then creates the kind cluster. This usually takes 5-10 minutes on a `t3.micro`.
 
 ## Verify the cluster from the local machine
 
@@ -107,6 +114,7 @@ You can also SSH in:
 ```bash
 ssh ubuntu@<EC2_PUBLIC_IP>
 sudo tail -f /var/log/k8s-install.log
+kind get clusters
 kubectl get nodes
 kubectl get pods -A
 ```
@@ -118,7 +126,7 @@ cd k8s-automation/scripts
 ./get-kubeconfig.sh <EC2_PUBLIC_IP>
 ```
 
-This copies the remote kubeconfig to `./kubeconfig` in the current directory.
+This copies `/home/ubuntu/.kube/config` to `./kubeconfig` in the current directory. The server entry already points at `https://<EC2_PUBLIC_IP>:6443`, and the API certificate includes that public IP, so the cluster is reachable from your machine when `kubernetes_api_cidr` allows your IP.
 
 ## Destroy the lab
 
@@ -136,6 +144,7 @@ This removes Terraform-managed infrastructure only. It does not delete unrelated
 - The lab uses a public subnet with direct Internet access.
 - You are responsible for protecting your AWS credentials and SSH keys.
 - This lab is intentionally simple and low-cost, but AWS charges may still apply for EC2, EBS, and public IPv4 usage.
+- `t3.micro` gives 1 GiB of RAM; a 2 GB swap file is created automatically so the kind control plane fits. Expect slower boot and scheduling than a larger instance.
 
 ## Documentation
 

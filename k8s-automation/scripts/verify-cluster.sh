@@ -10,4 +10,4 @@ if [ -z "$HOST" ]; then
 fi
 
 ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "${SSH_USER}@${HOST}" \
-  'sudo -n bash -c "kubectl get nodes -o wide && echo && kubectl get pods -A && echo && kubectl wait --for=condition=Ready node --all --timeout=300s"'
+  'sudo -n bash -c "kind get clusters && echo && kubectl get nodes -o wide && echo && kubectl get pods -A && echo && kubectl wait --for=condition=Ready node --all --timeout=300s"'
